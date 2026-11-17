@@ -1,6 +1,9 @@
 'use client';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import type { FlightData } from '@/lib/scrapers';
+
+// Leaflet mapa — carga dinámica para evitar SSR issues
+const FlightMap = lazy(() => import('@/components/FlightMap'));
 
 const REFRESH_INTERVAL = 30; // seconds
 
@@ -403,6 +406,29 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* MAPA INTERACTIVO */}
+              <div className="section-card">
+                <div className="section-head">
+                  <span>🗺 Mapa en tiempo real</span>
+                  {data.lat != null ? (
+                    <span style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'monospace' }}>
+                      📍 {data.lat.toFixed(4)}°N {data.lon?.toFixed(4)}°E
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 10, color: 'var(--muted2)' }}>GPS no disponible</span>
+                  )}
+                </div>
+                <div style={{ padding: '12px' }}>
+                  <Suspense fallback={
+                    <div style={{ height: 400, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1a1c23', borderRadius: 12, color: 'var(--muted)' }}>
+                      🗺 Cargando mapa…
+                    </div>
+                  }>
+                    <FlightMap flight={data} />
+                  </Suspense>
+                </div>
+              </div>
+
               {/* SOURCES */}
               <div className="section-card">
                 <div className="section-head">
@@ -411,16 +437,19 @@ export default function Home() {
                 </div>
                 <div className="section-body" style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                   {[
-                    { name: 'OpenSky Network', desc: 'Posición GPS en vivo', free: true },
-                    { name: 'AviationStack', desc: 'Estado + horarios', free: 'API key' },
+                    { name: 'ADSB.lol', desc: 'Posición GPS ADS-B', free: true },
+                    { name: 'airplanes.live', desc: 'GPS en vivo sin límites', free: true },
+                    { name: 'OpenSky Network', desc: 'ADS-B + búsqueda área', free: true },
+                    { name: 'ADSBDB', desc: 'Datos aeronave + ruta', free: true },
+                    { name: 'FlightStats', desc: 'Horarios y estado', free: true },
+                    { name: 'AviationStack', desc: 'Estado + horarios completos', free: 'API key' },
                     { name: 'FlightAware AeroAPI', desc: 'Datos completos', free: 'API key' },
-                    { name: 'FlightStats', desc: 'Scraper HTML', free: true },
                   ].map(s => (
                     <div key={s.name} style={{ flex: '1', minWidth: 140, background: 'var(--bg3)', borderRadius: 8, padding: '10px 12px' }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{s.name}</div>
                       <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{s.desc}</div>
                       <div style={{ fontSize: 10, color: s.free === true ? 'var(--green)' : 'var(--yellow)', marginTop: 4 }}>
-                        {s.free === true ? '✓ Gratis' : `⚙ Requiere ${s.free}`}
+                        {s.free === true ? '✓ Gratis · Sin key' : `⚙ Requiere ${s.free}`}
                       </div>
                     </div>
                   ))}

@@ -38,6 +38,87 @@ export interface FlightData {
   lastUpdated: string;
 }
 
+// --- ADSB.lol (free, no API key, covers Spain well) ---
+export async function scrapeAdsbLol(flightNumber: string): Promise<Partial<FlightData> | null> {
+  try {
+    const callsign = flightNumber.replace(/\s/g, '').toUpperCase();
+    // Search by callsign
+    const url = `https://api.adsb.lol/v2/callsign/${callsign}`;
+
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'FlightTracker/1.0 (https://flight-tracker-lime.vercel.app)',
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    // Response: { ac: [ aircraft... ] }
+    if (!data.ac || data.ac.length === 0) return null;
+
+    const ac = data.ac[0];
+    // Fields: lat, lon, alt_baro, gs (ground speed knots), track (heading),
+    //         flight (callsign), r (registration), t (aircraft type), desc, dbFlags
+
+    const onGround = ac.on_ground === true || ac.gnd === true || ac.alt_baro === 'ground';
+    const altFt = typeof ac.alt_baro === 'number' ? ac.alt_baro : (typeof ac.alt_geom === 'number' ? ac.alt_geom : null);
+
+    return {
+      lat: ac.lat || null,
+      lon: ac.lon || null,
+      altitude: altFt ? `${Math.round(altFt).toLocaleString()} ft` : '—',
+      speed: ac.gs ? `${Math.round(ac.gs)} kn` : '—',
+      heading: ac.track ? `${Math.round(ac.track)}°` : '—',
+      status: onGround ? 'active' : 'active',
+      aircraft: ac.t || ac.desc || '',
+      registration: ac.r || '',
+      source: 'ADSB.lol',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// --- airplanes.live (free, no API key, good Spain coverage) ---
+export async function scrapeAirplanesLive(flightNumber: string): Promise<Partial<FlightData> | null> {
+  try {
+    const callsign = flightNumber.replace(/\s/g, '').toUpperCase();
+    const url = `https://api.airplanes.live/v2/callsign/${callsign}`;
+
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'FlightTracker/1.0',
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.ac || data.ac.length === 0) return null;
+
+    const ac = data.ac[0];
+    const altFt = typeof ac.alt_baro === 'number' ? ac.alt_baro : (typeof ac.alt_geom === 'number' ? ac.alt_geom : null);
+
+    return {
+      lat: ac.lat || null,
+      lon: ac.lon || null,
+      altitude: altFt ? `${Math.round(altFt).toLocaleString()} ft` : '—',
+      speed: ac.gs ? `${Math.round(ac.gs)} kn` : '—',
+      heading: ac.track ? `${Math.round(ac.track)}°` : '—',
+      status: 'active',
+      aircraft: ac.t || ac.desc || '',
+      registration: ac.r || '',
+      source: 'airplanes.live',
+    };
+  } catch {
+    return null;
+  }
+}
+
 // --- OpenSky Network (free, no API key needed) ---
 export async function scrapeOpenSky(flightNumber: string): Promise<Partial<FlightData> | null> {
   try {
@@ -55,9 +136,6 @@ export async function scrapeOpenSky(flightNumber: string): Promise<Partial<Fligh
     if (!data.states || data.states.length === 0) return null;
 
     const state = data.states[0];
-    // OpenSky state vector: [icao24, callsign, origin_country, time_position, last_contact,
-    //   longitude, latitude, baro_altitude, on_ground, velocity, true_track, vertical_rate,
-    //   sensors, geo_altitude, squawk, spi, position_source]
     const lon = state[5];
     const lat = state[6];
     const alt = state[7]; // meters
@@ -68,11 +146,56 @@ export async function scrapeOpenSky(flightNumber: string): Promise<Partial<Fligh
     return {
       lat,
       lon,
-      altitude: alt ? `${Math.round(alt * 3.28084)} ft` : '—',
+      altitude: alt ? `${Math.round(alt * 3.28084).toLocaleString()} ft` : '—',
       speed: speed ? `${Math.round(speed * 1.944)} kn` : '—',
       heading: heading ? `${Math.round(heading)}°` : '—',
       status: onGround ? 'active' : 'active',
       source: 'OpenSky Network',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// --- OpenSky búsqueda por área (España + Baleares bounding box) ---
+export async function scrapeOpenSkyArea(flightNumber: string): Promise<Partial<FlightData> | null> {
+  try {
+    // Bounding box que cubre España + Baleares + parte del Mediterráneo
+    const url = `https://opensky-network.org/api/states/all?lamin=35.0&lomin=-10.0&lamax=44.5&lomax=5.0`;
+
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'FlightTracker/1.0' },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.states) return null;
+
+    const code = flightNumber.replace(/\s/g, '').toUpperCase();
+    // Buscar callsign que contenga el número de vuelo (con o sin espacios)
+    const state = data.states.find((s: unknown[]) => {
+      const cs = String(s[1] || '').trim().toUpperCase();
+      return cs === code || cs.startsWith(code) || code.startsWith(cs.replace(/\s/g, ''));
+    });
+
+    if (!state) return null;
+
+    const lon = state[5];
+    const lat = state[6];
+    const alt = state[7];
+    const speed = state[9];
+    const heading = state[10];
+    const onGround = state[8];
+
+    return {
+      lat,
+      lon,
+      altitude: alt ? `${Math.round(alt * 3.28084).toLocaleString()} ft` : '—',
+      speed: speed ? `${Math.round(speed * 1.944)} kn` : '—',
+      heading: heading ? `${Math.round(heading)}°` : '—',
+      status: onGround ? 'active' : 'active',
+      source: 'OpenSky (área)',
     };
   } catch {
     return null;
@@ -180,7 +303,7 @@ export async function scrapeFlightAware(flightNumber: string): Promise<Partial<F
       progress: f.progress_percent || 0,
       lat: f.last_position?.latitude || null,
       lon: f.last_position?.longitude || null,
-      altitude: f.last_position?.altitude ? `${f.last_position.altitude} ft` : '—',
+      altitude: f.last_position?.altitude ? `${f.last_position.altitude.toLocaleString()} ft` : '—',
       speed: f.last_position?.groundspeed ? `${f.last_position.groundspeed} kn` : '—',
       heading: f.last_position?.heading ? `${f.last_position.heading}°` : '—',
       source: 'FlightAware AeroAPI',
@@ -190,54 +313,29 @@ export async function scrapeFlightAware(flightNumber: string): Promise<Partial<F
   }
 }
 
-// --- FR24 public HTML scraper (no API key, best-effort) ---
-export async function scrapeFR24(flightNumber: string): Promise<Partial<FlightData> | null> {
-  try {
-    const url = `https://www.flightradar24.com/data/flights/${flightNumber.toLowerCase()}`;
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'es-ES,es;q=0.9',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!res.ok) return null;
-    const html = await res.text();
-    const $ = cheerio.load(html);
-
-    // Extract JSON-LD if present
-    const jsonLd = $('script[type="application/ld+json"]').first().text();
-    if (jsonLd) {
-      try {
-        const ld = JSON.parse(jsonLd);
-        if (ld.departureFlight || ld.name) {
-          return { source: 'Flightradar24 (HTML)', flightNumber };
-        }
-      } catch { /* ignore */ }
-    }
-
-    return { source: 'Flightradar24 (HTML)', flightNumber };
-  } catch {
-    return null;
-  }
-}
-
-// --- FlightStats scraper ---
+// --- FlightStats scraper (mejorado con más headers) ---
 export async function scrapeFlightStats(flightNumber: string): Promise<Partial<FlightData> | null> {
   try {
     const airline = flightNumber.match(/^[A-Z]+/)?.[0] || '';
     const number = flightNumber.match(/\d+/)?.[0] || '';
-    const today = new Date();
     const url = `https://www.flightstats.com/v2/flight-tracker/${airline}/${number}`;
 
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
       },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(12000),
     });
 
     if (!res.ok) return null;
@@ -285,37 +383,97 @@ export async function scrapeFlightStats(flightNumber: string): Promise<Partial<F
   }
 }
 
+// --- ADSBDB (datos de aeronave, sin posición en tiempo real) ---
+export async function scrapeAdsbDb(flightNumber: string): Promise<Partial<FlightData> | null> {
+  try {
+    const callsign = flightNumber.replace(/\s/g, '').toUpperCase();
+    const url = `https://api.adsbdb.com/v0/callsign/${callsign}`;
+
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'FlightTracker/1.0', 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+
+    // Response: { response: { flightroute: { ... }, aircraft: { ... } } }
+    const route = data?.response?.flightroute;
+    const aircraft = data?.response?.aircraft || route?.aircraft;
+
+    if (!route && !aircraft) return null;
+
+    const result: Partial<FlightData> = { source: 'ADSBDB' };
+
+    if (aircraft) {
+      result.aircraft = `${aircraft.manufacturer || ''} ${aircraft.type || ''}`.trim() || aircraft.icao_type || '';
+      result.registration = aircraft.registration || '';
+      result.airline = aircraft.registered_owner || '';
+    }
+
+    if (route) {
+      result.departure = {
+        iata: route.origin?.iata_code || '',
+        name: route.origin?.name || '',
+        city: route.origin?.municipality || '',
+        scheduled: '', actual: null, estimated: null, gate: null, terminal: null,
+      };
+      result.arrival = {
+        iata: route.destination?.iata_code || '',
+        name: route.destination?.name || '',
+        city: route.destination?.municipality || '',
+        scheduled: '', actual: null, estimated: null, gate: null, terminal: null,
+      };
+      if (route.airline) {
+        result.airline = route.airline.name || route.airline.icao || result.airline || '';
+      }
+    }
+
+    return result;
+  } catch {
+    return null;
+  }
+}
+
 // --- Merge results from multiple sources ---
 export async function getFlightData(flightNumber: string): Promise<FlightData> {
   const code = flightNumber.toUpperCase().trim();
 
   // Run all scrapers in parallel
-  const [opensky, aviationstack, flightaware, fr24, flightstats] = await Promise.allSettled([
+  const [adsbLol, airplanesLive, opensky, openskArea, aviationstack, flightaware, flightstats, adsbdb] = await Promise.allSettled([
+    scrapeAdsbLol(code),
+    scrapeAirplanesLive(code),
     scrapeOpenSky(code),
+    scrapeOpenSkyArea(code),
     scrapeAviationStack(code),
     scrapeFlightAware(code),
-    scrapeFR24(code),
     scrapeFlightStats(code),
+    scrapeAdsbDb(code),
   ]);
 
-  const results = [opensky, aviationstack, flightaware, fr24, flightstats]
+  const results = [adsbLol, airplanesLive, opensky, openskArea, aviationstack, flightaware, flightstats, adsbdb]
     .map(r => r.status === 'fulfilled' ? r.value : null)
     .filter(Boolean) as Partial<FlightData>[];
 
-  // Merge: prefer FlightAware > AviationStack > FlightStats > FR24 > OpenSky
+  // Merge: prefer FlightAware > AviationStack > FlightStats > ADSBDB > OpenSky
+  // (para datos estáticos como aeropuertos, horarios)
   const merged = results.reduce((acc, r) => ({ ...acc, ...r }), {} as Partial<FlightData>);
 
-  // Priority override for live position: OpenSky has best real-time
-  const os = opensky.status === 'fulfilled' ? opensky.value : null;
-  if (os?.lat) {
-    merged.lat = os.lat;
-    merged.lon = os.lon;
-    merged.altitude = os.altitude;
-    merged.speed = os.speed;
-    merged.heading = os.heading;
+  // Priority para posición en tiempo real: ADSB.lol > airplanes.live > OpenSky área > OpenSky directo
+  const livePos = [adsbLol, airplanesLive, openskArea, opensky]
+    .map(r => r.status === 'fulfilled' ? r.value : null)
+    .find(r => r?.lat != null);
+
+  if (livePos?.lat) {
+    merged.lat = livePos.lat;
+    merged.lon = livePos.lon;
+    merged.altitude = livePos.altitude || merged.altitude;
+    merged.speed = livePos.speed || merged.speed;
+    merged.heading = livePos.heading || merged.heading;
+    merged.status = 'active';
   }
 
-  const sources = results.map(r => r?.source).filter(Boolean).join(' + ') || 'Sin datos';
+  const activeSources = results.map(r => r?.source).filter(Boolean).join(' + ') || 'Sin datos';
 
   return {
     flightNumber: merged.flightNumber || code,
@@ -342,7 +500,7 @@ export async function getFlightData(flightNumber: string): Promise<FlightData> {
     heading: merged.heading || '—',
     lat: merged.lat || null,
     lon: merged.lon || null,
-    source: sources,
+    source: activeSources,
     lastUpdated: new Date().toISOString(),
   };
 }
@@ -384,6 +542,7 @@ function inferAirline(code: string): string {
     'LH': 'Lufthansa', 'KL': 'KLM', 'BA': 'British Airways',
     'FR': 'Ryanair', 'U2': 'easyJet', 'AF': 'Air France',
     'AZ': 'ITA Airways', 'BT': 'airBaltic',
+    'ANE': 'Air Nostrum', 'IBE': 'Iberia',
   };
   return airlines[prefix] || prefix;
 }

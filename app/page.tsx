@@ -29,6 +29,19 @@ const STATUS_MAP = {
   unknown: { cls: 's-unknown', label: 'Sin datos' },
 };
 
+// Genera variantes de indicativo: IB2454 → [IB2454, ANE2454], etc.
+function getCallsignVariants(flightNumber: string): string[] {
+  const base = flightNumber.replace(/\s/g, '').toUpperCase();
+  const variants: string[] = [];
+  if (base.startsWith('IB')) variants.push('ANE' + base.slice(2));
+  else if (base.startsWith('ANE')) variants.push('IB' + base.slice(3));
+  if (base.startsWith('I2')) variants.push('IBS' + base.slice(2));
+  else if (base.startsWith('IBS')) variants.push('I2' + base.slice(3));
+  if (base.startsWith('VY')) variants.push('VLG' + base.slice(2));
+  else if (base.startsWith('VLG')) variants.push('VY' + base.slice(3));
+  return variants;
+}
+
 function getRouteCoords(from: string, to: string) {
   const coords: Record<string, [number, number]> = {
     BIO: [2.9, 43.3], PMI: [2.7, 39.6], MAD: [-3.6, 40.4],
@@ -276,6 +289,35 @@ export default function Home() {
                   <div>
                     <div className="fr-flight-id">{data.flightNumber}</div>
                     <div className="fr-airline">{data.airline} · {data.aircraft} · {data.registration}</div>
+                    {/* Identificadores alternativos */}
+                    {getCallsignVariants(data.flightNumber).length > 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 11, color: 'var(--muted2)', whiteSpace: 'nowrap' }}>También conocido como:</span>
+                        {getCallsignVariants(data.flightNumber).map(alt => (
+                          <button
+                            key={alt}
+                            onClick={() => search(alt)}
+                            style={{
+                              background: 'rgba(255,193,7,0.12)',
+                              border: '1px solid rgba(255,193,7,0.4)',
+                              borderRadius: 6,
+                              color: '#ffc107',
+                              fontSize: 12,
+                              fontWeight: 700,
+                              fontFamily: 'monospace',
+                              padding: '2px 8px',
+                              cursor: 'pointer',
+                              transition: 'background 0.15s',
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,193,7,0.22)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,193,7,0.12)')}
+                            title={`Buscar con indicativo ${alt}`}
+                          >
+                            {alt}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className={`fr-status ${st2.cls}`}>
                     <span className="dot" />

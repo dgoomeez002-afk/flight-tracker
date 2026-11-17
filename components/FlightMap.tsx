@@ -213,6 +213,10 @@ export default function FlightMap({ flight }: FlightMapProps) {
         }).addTo(map);
 
         mapInstanceRef.current = map;
+
+        // Fix tile fragmentation: recalculate container size after CSS/hydration
+        setTimeout(() => { map.invalidateSize(); }, 150);
+        setTimeout(() => { map.invalidateSize(); }, 400);
       }
     });
 

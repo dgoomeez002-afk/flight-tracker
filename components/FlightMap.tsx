@@ -42,10 +42,27 @@ function getAirportCoords(iata: string): [number, number] | null {
   return AIRPORT_COORDS[iata] || null;
 }
 
+// Generate callsign variants to try (IB2454 → also try ANE2454, IBE2454, etc.)
+function getCallsignVariants(flightNumber: string): string[] {
+  const base = flightNumber.replace(/\s/g, '').toUpperCase();
+  const variants = [base];
+  // Iberia operated by Air Nostrum: IB↔ANE
+  if (base.startsWith('IB')) variants.push('ANE' + base.slice(2));
+  if (base.startsWith('ANE')) variants.push('IB' + base.slice(3));
+  // Iberia Express: I2↔IBS
+  if (base.startsWith('I2')) variants.push('IBS' + base.slice(2));
+  if (base.startsWith('IBS')) variants.push('I2' + base.slice(3));
+  // Vueling: VY↔VLG
+  if (base.startsWith('VY')) variants.push('VLG' + base.slice(2));
+  if (base.startsWith('VLG')) variants.push('VY' + base.slice(3));
+  return variants;
+}
+
 // Fetch live GPS position directly from browser (bypasses Vercel server restrictions)
 async function fetchLivePosition(flightNumber: string): Promise<LivePos | null> {
-  const callsign = flightNumber.replace(/\s/g, '').toUpperCase();
+  const variants = getCallsignVariants(flightNumber);
 
+  for (const callsign of variants) {
   // Try ADSB.lol first
   try {
     const res = await fetch(`https://api.adsb.lol/v2/callsign/${callsign}`, {
@@ -93,6 +110,7 @@ async function fetchLivePosition(flightNumber: string): Promise<LivePos | null> 
       }
     }
   } catch { /* fallthrough */ }
+  } // end for variants
 
   return null;
 }

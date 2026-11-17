@@ -75,6 +75,39 @@ function routeToSVG(ox: number, oy: number, dx: number, dy: number, progress: nu
   return { O, D, C, px, py, angle, planeColor, isFlying };
 }
 
+// Enrich flight data from ADSB client-side (bypasses Vercel server blocks)
+// Returns aircraft type, registration, airline name from ADSB.lol
+async function fetchAdsbEnrichment(flightNumber: string): Promise<{
+  aircraft?: string; registration?: string; airline?: string;
+  status?: string; departure?: { iata: string }; arrival?: { iata: string };
+} | null> {
+  const variants = getCallsignVariants(flightNumber);
+  const allCallsigns = [flightNumber.toUpperCase(), ...variants];
+
+  for (const callsign of allCallsigns) {
+    for (const base of [`https://api.adsb.lol/v2/callsign/${callsign}`, `https://api.airplanes.live/v2/callsign/${callsign}`]) {
+      try {
+        const res = await fetch(base, { signal: AbortSignal.timeout(6000) });
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (!data.ac || data.ac.length === 0) continue;
+        const ac = data.ac[0];
+        if (!ac) continue;
+        const result: { aircraft?: string; registration?: string; airline?: string; status?: string } = {};
+        if (ac.t) result.aircraft = ac.t;
+        if (ac.r) result.registration = ac.r;
+        if (ac.ownOp || ac.owner) result.airline = ac.ownOp || ac.owner;
+        // desc sometimes has "Boeing 737" etc
+        if (!result.aircraft && ac.desc) result.aircraft = ac.desc;
+        const onGround = ac.on_ground || ac.gnd || ac.alt_baro === 'ground';
+        result.status = onGround ? 'landed' : 'active';
+        if (Object.keys(result).length > 0) return result;
+      } catch { /* continue */ }
+    }
+  }
+  return null;
+}
+
 export default function Home() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -94,7 +127,29 @@ export default function Home() {
       const res = await fetch(`/api/flight?flight=${encodeURIComponent(flightNum)}`);
       const json = await res.json();
       if (!res.ok) { setError(json.error || 'Error desconocido'); setData(null); }
-      else { setData(json); setLastUpdated(new Date().toLocaleTimeString('es-ES')); }
+      else {
+        setData(json);
+        setLastUpdated(new Date().toLocaleTimeString('es-ES'));
+
+        // If server returned no useful data, enrich from ADSB client-side
+        const needsEnrich = json.aircraft === '—' || json.registration === '—' || json.status === 'unknown';
+        if (needsEnrich) {
+          fetchAdsbEnrichment(flightNum).then(enriched => {
+            if (enriched) {
+              setData(prev => {
+                if (!prev || prev.flightNumber !== json.flightNumber) return prev;
+                return {
+                  ...prev,
+                  aircraft: (enriched.aircraft && enriched.aircraft !== '—') ? enriched.aircraft : prev.aircraft,
+                  registration: (enriched.registration && enriched.registration !== '—') ? enriched.registration : prev.registration,
+                  airline: (enriched.airline && enriched.airline !== '—') ? enriched.airline : prev.airline,
+                  status: (enriched.status && prev.status === 'unknown') ? (enriched.status as FlightData['status']) : prev.status,
+                };
+              });
+            }
+          });
+        }
+      }
     } catch {
       setError('Error de conexión');
     } finally {

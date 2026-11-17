@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import 'leaflet/dist/leaflet.css';
 import type { FlightData } from '@/lib/scrapers';
 
 interface FlightMapProps {
@@ -170,23 +171,29 @@ export default function FlightMap({ flight }: FlightMapProps) {
     };
   }, [flight.flightNumber]);
 
-  // Map initialization
+  // Map initialization — runs once after mount
   useEffect(() => {
-    if (!mapRef.current) return;
     if (typeof window === 'undefined') return;
 
-    import('leaflet').then((L) => {
-      // Fix default icon issue with webpack
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      delete (L.Icon.Default.prototype as any)._getIconUrl;
-      L.Icon.Default.mergeOptions({
-        iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
-        iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
-        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-      });
+    // Wait one frame so the browser has painted and the div has real dimensions
+    const rafId = requestAnimationFrame(() => {
+      if (!mapRef.current) return;
 
-      // Initialize map only once
-      if (!mapInstanceRef.current) {
+      // Force the container to have a concrete pixel height before Leaflet reads it
+      mapRef.current.style.height = '400px';
+
+      import('leaflet').then((L) => {
+        // Fix default icon issue with webpack
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        delete (L.Icon.Default.prototype as any)._getIconUrl;
+        L.Icon.Default.mergeOptions({
+          iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+          iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+          shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+        });
+
+        if (mapInstanceRef.current) return; // already initialised
+
         let center: [number, number] = [40.0, -3.5];
         let zoom = 6;
 
@@ -214,13 +221,20 @@ export default function FlightMap({ flight }: FlightMapProps) {
 
         mapInstanceRef.current = map;
 
-        // Fix tile fragmentation: recalculate container size after CSS/hydration
-        setTimeout(() => { map.invalidateSize(); }, 150);
-        setTimeout(() => { map.invalidateSize(); }, 400);
-      }
+        // Final size recalc after tiles start loading
+        setTimeout(() => { map.invalidateSize(); }, 300);
+
+        // Also watch for container resize (e.g. panel expansion)
+        if (typeof ResizeObserver !== 'undefined') {
+          const ro = new ResizeObserver(() => { map.invalidateSize(); });
+          ro.observe(mapRef.current!);
+        }
+      });
     });
 
-    return () => { /* keep map alive */ };
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -353,9 +367,11 @@ export default function FlightMap({ flight }: FlightMapProps) {
         style={{
           width: '100%',
           height: '400px',
+          minHeight: '400px',
           borderRadius: '12px',
           border: '1px solid #3a3d4a',
           overflow: 'hidden',
+          position: 'relative',
         }}
       />
       {/* Status badge */}

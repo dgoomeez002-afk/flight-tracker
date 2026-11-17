@@ -1,10 +1,19 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FlightData } from '@/lib/scrapers';
 
 interface FlightMapProps {
   flight: FlightData & { cached?: boolean };
+}
+
+interface LivePos {
+  lat: number;
+  lon: number;
+  altitude: string;
+  speed: string;
+  heading: string;
+  source: string;
 }
 
 // Airport coordinates lookup
@@ -23,14 +32,69 @@ const AIRPORT_COORDS: Record<string, [number, number]> = {
   'FRA': [50.0379, 8.5622], 'FCO': [41.8003, 12.2389], 'MUC': [48.3537, 11.7750],
   'ZRH': [47.4647, 8.5492], 'VIE': [48.1103, 16.5697], 'BRU': [50.9014, 4.4844],
   'LIS': [38.7813, -9.1359], 'ATH': [37.9364, 23.9445], 'CPH': [55.6180, 12.6560],
-  'ARN': [59.6519, 17.9186], 'OSL': [60.1939, 11.1004], 'HEL': [60.3172, 24.9633],
+  'ARN': [59.6519, 17.9196], 'OSL': [60.1939, 11.1004], 'HEL': [60.3172, 24.9633],
   'DUB': [53.4213, -6.2701], 'MAN': [53.3537, -2.2750], 'IST': [41.2608, 28.7418],
-  'ORY': [48.7233, 2.3794], 'NCE': [43.6584, 7.2158], 'TXL': [52.5597, 13.2877],
-  'HAM': [53.6304, 10.0063], 'DUS': [51.2895, 6.7668], 'BER': [52.3667, 13.5033],
+  'ORY': [48.7233, 2.3794], 'NCE': [43.6584, 7.2158], 'BER': [52.3667, 13.5033],
+  'HAM': [53.6304, 10.0063], 'DUS': [51.2895, 6.7668],
 };
 
 function getAirportCoords(iata: string): [number, number] | null {
   return AIRPORT_COORDS[iata] || null;
+}
+
+// Fetch live GPS position directly from browser (bypasses Vercel server restrictions)
+async function fetchLivePosition(flightNumber: string): Promise<LivePos | null> {
+  const callsign = flightNumber.replace(/\s/g, '').toUpperCase();
+
+  // Try ADSB.lol first
+  try {
+    const res = await fetch(`https://api.adsb.lol/v2/callsign/${callsign}`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.ac && data.ac.length > 0) {
+        const ac = data.ac[0];
+        if (ac.lat && ac.lon) {
+          const altFt = typeof ac.alt_baro === 'number' ? ac.alt_baro : (typeof ac.alt_geom === 'number' ? ac.alt_geom : null);
+          return {
+            lat: ac.lat,
+            lon: ac.lon,
+            altitude: altFt ? `${Math.round(altFt).toLocaleString()} ft` : '—',
+            speed: ac.gs ? `${Math.round(ac.gs)} kn` : '—',
+            heading: ac.track ? `${Math.round(ac.track)}°` : '0°',
+            source: 'ADSB.lol',
+          };
+        }
+      }
+    }
+  } catch { /* fallthrough */ }
+
+  // Try airplanes.live
+  try {
+    const res = await fetch(`https://api.airplanes.live/v2/callsign/${callsign}`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.ac && data.ac.length > 0) {
+        const ac = data.ac[0];
+        if (ac.lat && ac.lon) {
+          const altFt = typeof ac.alt_baro === 'number' ? ac.alt_baro : null;
+          return {
+            lat: ac.lat,
+            lon: ac.lon,
+            altitude: altFt ? `${Math.round(altFt).toLocaleString()} ft` : '—',
+            speed: ac.gs ? `${Math.round(ac.gs)} kn` : '—',
+            heading: ac.track ? `${Math.round(ac.track)}°` : '0°',
+            source: 'airplanes.live',
+          };
+        }
+      }
+    }
+  } catch { /* fallthrough */ }
+
+  return null;
 }
 
 export default function FlightMap({ flight }: FlightMapProps) {
@@ -42,15 +106,57 @@ export default function FlightMap({ flight }: FlightMapProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const routeLineRef = useRef<any>(null);
 
-  const hasPosition = flight.lat != null && flight.lon != null;
+  // Live position fetched client-side (bypasses Vercel server blocks)
+  const [livePos, setLivePos] = useState<LivePos | null>(null);
+  const [fetchStatus, setFetchStatus] = useState<'loading' | 'ok' | 'error'>('loading');
+
   const depCoords = getAirportCoords(flight.departure.iata);
   const arrCoords = getAirportCoords(flight.arrival.iata);
 
+  // Use server position as fallback if live fetch hasn't resolved yet
+  const pos: LivePos | null = livePos ?? (
+    flight.lat != null && flight.lon != null
+      ? {
+          lat: flight.lat,
+          lon: flight.lon,
+          altitude: flight.altitude,
+          speed: flight.speed,
+          heading: flight.heading,
+          source: flight.source,
+        }
+      : null
+  );
+
+  // Fetch live position from browser on mount and every 30s
+  useEffect(() => {
+    let cancelled = false;
+
+    const doFetch = async () => {
+      setFetchStatus('loading');
+      const result = await fetchLivePosition(flight.flightNumber);
+      if (!cancelled) {
+        if (result) {
+          setLivePos(result);
+          setFetchStatus('ok');
+        } else {
+          setFetchStatus('error');
+        }
+      }
+    };
+
+    doFetch();
+    const interval = setInterval(doFetch, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [flight.flightNumber]);
+
+  // Map initialization
   useEffect(() => {
     if (!mapRef.current) return;
     if (typeof window === 'undefined') return;
 
-    // Dynamically import leaflet (client-only)
     import('leaflet').then((L) => {
       // Fix default icon issue with webpack
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -61,21 +167,20 @@ export default function FlightMap({ flight }: FlightMapProps) {
         shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
       });
 
-      // Determine map center
-      let center: [number, number] = [40.0, -3.5]; // España por defecto
-      let zoom = 6;
-
-      if (hasPosition) {
-        center = [flight.lat!, flight.lon!];
-        zoom = 7;
-      } else if (depCoords && arrCoords) {
-        center = [(depCoords[0] + arrCoords[0]) / 2, (depCoords[1] + arrCoords[1]) / 2];
-      } else if (depCoords) {
-        center = depCoords;
-      }
-
       // Initialize map only once
       if (!mapInstanceRef.current) {
+        let center: [number, number] = [40.0, -3.5];
+        let zoom = 6;
+
+        if (pos) {
+          center = [pos.lat, pos.lon];
+          zoom = 7;
+        } else if (depCoords && arrCoords) {
+          center = [(depCoords[0] + arrCoords[0]) / 2, (depCoords[1] + arrCoords[1]) / 2];
+        } else if (depCoords) {
+          center = depCoords;
+        }
+
         const map = L.map(mapRef.current!, {
           center,
           zoom,
@@ -83,29 +188,32 @@ export default function FlightMap({ flight }: FlightMapProps) {
           attributionControl: true,
         });
 
-        // Dark tile layer (compatible con el tema oscuro)
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-          subdomains: 'abcd',
-          maxZoom: 20,
+        // OpenStreetMap tiles — sin API key, sin restricciones
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          maxZoom: 19,
         }).addTo(map);
 
         mapInstanceRef.current = map;
       }
+    });
 
+    return () => { /* keep map alive */ };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Update markers when position changes
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+
+    import('leaflet').then((L) => {
       const map = mapInstanceRef.current;
 
-      // Clear previous layers
-      if (routeLineRef.current) {
-        map.removeLayer(routeLineRef.current);
-        routeLineRef.current = null;
-      }
-      if (planeMarkerRef.current) {
-        map.removeLayer(planeMarkerRef.current);
-        planeMarkerRef.current = null;
-      }
+      // Clear previous markers/lines
+      if (routeLineRef.current) { map.removeLayer(routeLineRef.current); routeLineRef.current = null; }
+      if (planeMarkerRef.current) { map.removeLayer(planeMarkerRef.current); planeMarkerRef.current = null; }
 
-      // Draw route line if we have both airports
+      // Route line
       if (depCoords && arrCoords) {
         const routeLine = L.polyline([depCoords, arrCoords], {
           color: '#ffc107',
@@ -115,7 +223,6 @@ export default function FlightMap({ flight }: FlightMapProps) {
         }).addTo(map);
         routeLineRef.current = routeLine;
 
-        // Airport markers
         const airportIcon = L.divIcon({
           html: `<div style="width:10px;height:10px;background:#ffc107;border-radius:50%;border:2px solid #fff;"></div>`,
           className: '',
@@ -133,8 +240,8 @@ export default function FlightMap({ flight }: FlightMapProps) {
       }
 
       // Plane marker
-      if (hasPosition) {
-        const headingDeg = parseInt(flight.heading?.replace('°', '') || '0') || 0;
+      if (pos) {
+        const headingDeg = parseInt(pos.heading?.replace('°', '') || '0') || 0;
 
         const planeIcon = L.divIcon({
           html: `
@@ -149,34 +256,28 @@ export default function FlightMap({ flight }: FlightMapProps) {
           iconAnchor: [16, 16],
         });
 
-        const planeMarker = L.marker([flight.lat!, flight.lon!], { icon: planeIcon })
+        const planeMarker = L.marker([pos.lat, pos.lon], { icon: planeIcon })
           .addTo(map)
           .bindPopup(`
             <div style="font-family:monospace; min-width:160px;">
               <b style="color:#ffc107; font-size:14px;">${flight.flightNumber}</b><br>
               <span style="color:#aaa;">✈ ${flight.aircraft !== '—' ? flight.aircraft : ''}</span><br>
               <hr style="border-color:#333; margin:4px 0;">
-              📍 ${flight.lat?.toFixed(4)}°N, ${flight.lon?.toFixed(4)}°E<br>
-              🏔 ${flight.altitude}<br>
-              💨 ${flight.speed}<br>
-              🧭 ${flight.heading}<br>
+              📍 ${pos.lat.toFixed(4)}°N, ${pos.lon.toFixed(4)}°E<br>
+              🏔 ${pos.altitude}<br>
+              💨 ${pos.speed}<br>
+              🧭 ${pos.heading}<br>
               <hr style="border-color:#333; margin:4px 0;">
-              <small style="color:#888;">Fuente: ${flight.source}</small>
+              <small style="color:#888;">Fuente: ${pos.source}</small>
             </div>
           `, { className: 'dark-popup' })
           .openPopup();
 
         planeMarkerRef.current = planeMarker;
-
-        // Center map on plane
-        map.setView([flight.lat!, flight.lon!], Math.max(map.getZoom(), 7));
+        map.setView([pos.lat, pos.lon], Math.max(map.getZoom(), 7));
       }
     });
-
-    return () => {
-      // Don't destroy map on re-render, just update markers
-    };
-  }, [flight.lat, flight.lon, flight.heading, flight.altitude, flight.speed, hasPosition, depCoords, arrCoords, flight]);
+  }, [pos, depCoords, arrCoords, flight]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -235,7 +336,25 @@ export default function FlightMap({ flight }: FlightMapProps) {
           overflow: 'hidden',
         }}
       />
-      {!hasPosition && (
+      {/* Status badge */}
+      <div style={{
+        position: 'absolute',
+        top: '8px',
+        right: '8px',
+        background: 'rgba(26,28,35,0.9)',
+        border: `1px solid ${fetchStatus === 'ok' ? '#22c55e' : fetchStatus === 'error' ? '#ef4444' : '#3a3d4a'}`,
+        borderRadius: '6px',
+        padding: '4px 8px',
+        color: fetchStatus === 'ok' ? '#22c55e' : fetchStatus === 'error' ? '#ef4444' : '#888',
+        fontSize: '11px',
+        zIndex: 1000,
+      }}>
+        {fetchStatus === 'loading' && '⏳ Buscando posición...'}
+        {fetchStatus === 'ok' && pos && `✅ GPS: ${pos.lat.toFixed(3)}°N ${pos.lon.toFixed(3)}°E`}
+        {fetchStatus === 'error' && '❌ GPS no disponible'}
+      </div>
+      {/* No position overlay */}
+      {!pos && (
         <div style={{
           position: 'absolute',
           top: '50%',
@@ -249,6 +368,7 @@ export default function FlightMap({ flight }: FlightMapProps) {
           fontSize: '13px',
           textAlign: 'center',
           pointerEvents: 'none',
+          zIndex: 999,
         }}>
           📡 Posición GPS no disponible<br />
           <span style={{ fontSize: '11px' }}>Se muestra la ruta {flight.departure.iata} → {flight.arrival.iata}</span>
